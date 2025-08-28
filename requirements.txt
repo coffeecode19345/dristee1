@@ -1,3 +1,6 @@
 streamlit
 pillow
+python-dotenv
+numpy
 face_recognition
+dlib
