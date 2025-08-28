@@ -11,13 +11,25 @@ from PIL import Image
 def init_db():
     conn = sqlite3.connect("gallery.db")
     c = conn.cursor()
+    # Create folders table
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS folders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            folder TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            age INTEGER NOT NULL,
+            profession TEXT NOT NULL,
+            category TEXT NOT NULL
+        )
+    """)
     # Create images table
     c.execute("""
         CREATE TABLE IF NOT EXISTS images (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             folder TEXT NOT NULL,
-            image_data BLOB NOT NULL
+            image_data BLOB NOT NULL,
+            FOREIGN KEY (folder) REFERENCES folders (folder)
         )
     """)
     # Create surveys table
@@ -27,14 +39,61 @@ def init_db():
             folder TEXT NOT NULL,
             rating INTEGER NOT NULL,
             feedback TEXT,
-            timestamp TEXT NOT NULL
+            timestamp TEXT NOT NULL,
+            FOREIGN KEY (folder) REFERENCES folders (folder)
         )
     """)
+    conn.commit()
+    # Initialize default folders if not present
+    default_folders = [
+        {"name": "Sarika", "age": 28, "profession": "Photographer", "category": "Artists", "folder": "sarika"},
+        {"name": "Jamuna", "age": 32, "profession": "Sculptor", "category": "Artists", "folder": "jamuna"},
+    ]
+    for folder_data in default_folders:
+        c.execute("SELECT COUNT(*) FROM folders WHERE folder = ?", (folder_data["folder"],))
+        if c.fetchone()[0] == 0:
+            c.execute("""
+                INSERT INTO folders (folder, name, age, profession, category)
+                VALUES (?, ?, ?, ?, ?)
+            """, (folder_data["folder"], folder_data["name"], folder_data["age"],
+                  folder_data["profession"], folder_data["category"]))
     conn.commit()
     conn.close()
 
 # -------------------------------
-# Load images into database (from uploaded files or temporary folders)
+# Load folders from database
+# -------------------------------
+def load_folders():
+    conn = sqlite3.connect("gallery.db")
+    c = conn.cursor()
+    c.execute("SELECT folder, name, age, profession, category FROM folders")
+    folders = [{"folder": row[0], "name": row[1], "age": row[2], "profession": row[3], "category": row[4]}
+               for row in c.fetchall()]
+    conn.close()
+    return folders
+
+# -------------------------------
+# Add new folder to database
+# -------------------------------
+def add_folder(folder, name, age, profession, category):
+    try:
+        conn = sqlite3.connect("gallery.db")
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO folders (folder, name, age, profession, category)
+            VALUES (?, ?, ?, ?, ?)
+        """, (folder, name, age, profession, category))
+        conn.commit()
+        conn.close()
+        return True
+    except sqlite3.IntegrityError:
+        return False  # Folder already exists
+    except Exception as e:
+        st.error(f"Error adding folder: {str(e)}")
+        return False
+
+# -------------------------------
+# Load images into database
 # -------------------------------
 def load_images_to_db(uploaded_files, folder):
     conn = sqlite3.connect("gallery.db")
@@ -106,22 +165,33 @@ def get_images_from_db(folder):
     return images
 
 # -------------------------------
-# Data for the two test folders
-# -------------------------------
-data = [
-    {"name": "Sarika", "age": 28, "profession": "Photographer", "category": "Artists", "folder": "sarika"},
-    {"name": "Jamuna", "age": 32, "profession": "Sculptor", "category": "Artists", "folder": "jamuna"},
-]
-
-# -------------------------------
 # Initialize database
 # -------------------------------
 init_db()
 
 # -------------------------------
-# Image Upload Section (for initializing database)
+# Sidebar for Folder Creation and Image Upload
 # -------------------------------
-st.sidebar.title("Upload Images to Database")
+st.sidebar.title("Manage Folders and Images")
+st.sidebar.subheader("Create New Folder")
+with st.sidebar.form(key="add_folder_form"):
+    new_folder = st.text_input("Folder Name (e.g., 'newfolder')")
+    new_name = st.text_input("Person Name")
+    new_age = st.number_input("Age", min_value=1, max_value=150, step=1)
+    new_profession = st.text_input("Profession")
+    new_category = st.text_input("Category", value="Artists")
+    if st.form_submit_button("Add Folder"):
+        if new_folder and new_name and new_profession and new_category:
+            if add_folder(new_folder.lower(), new_name, new_age, new_profession, new_category):
+                st.sidebar.success(f"Folder '{new_folder}' added successfully!")
+                st.rerun()
+            else:
+                st.sidebar.error(f"Folder '{new_folder}' already exists or invalid input.")
+        else:
+            st.sidebar.error("Please fill in all fields.")
+
+st.sidebar.subheader("Upload Images")
+data = load_folders()  # Load folders dynamically from database
 folder_choice = st.sidebar.selectbox("Select Folder", [item["folder"] for item in data])
 uploaded_files = st.sidebar.file_uploader("Upload Images", accept_multiple_files=True, type=['jpg', 'jpeg', 'png'])
 if uploaded_files and folder_choice:
@@ -165,7 +235,7 @@ tabs = st.tabs(categories)
 
 # -------------------------------
 # Loop through categories
-# -------------------------------
+# -----------------------
 for category, tab in zip(categories, tabs):
     with tab:
         st.header(category)
