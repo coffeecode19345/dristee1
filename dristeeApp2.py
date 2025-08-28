@@ -7,8 +7,6 @@ from datetime import datetime
 import uuid
 import re
 import base64
-import numpy as np
-import face_recognition  # For face swap
 from dotenv import load_dotenv
 
 # Load environment variables for secure password
@@ -145,52 +143,6 @@ def swap_image(folder, old_image_name, new_image_file):
     except Exception as e:
         st.error(f"Error swapping image: {str(e)}")
         return False
-
-def perform_face_swap(source_image_data, target_image_data):
-    """Perform face swap between source and target images using face_recognition."""
-    try:
-        # Convert image data to PIL Images
-        source_img = Image.open(io.BytesIO(source_image_data)).convert("RGB")
-        target_img = Image.open(io.BytesIO(target_image_data)).convert("RGB")
-
-        # Convert to numpy arrays for face_recognition
-        source_array = np.array(source_img)
-        target_array = np.array(target_img)
-
-        # Detect faces in both images
-        source_faces = face_recognition.face_locations(source_array)
-        target_faces = face_recognition.face_locations(target_array)
-
-        if not source_faces or not target_faces:
-            st.error("No faces detected in one or both images.")
-            return None
-
-        # Get the first face from each image
-        source_top, source_right, source_bottom, source_left = source_faces[0]
-        target_top, target_right, target_bottom, target_left = target_faces[0]
-
-        # Extract face regions
-        source_face = source_array[source_top:source_bottom, source_left:source_right]
-        target_face = target_array[target_top:target_bottom, target_left:target_right]
-
-        # Resize source face to match target face dimensions
-        source_face_pil = Image.fromarray(source_face)
-        target_face_size = (target_right - target_left, target_bottom - target_top)
-        source_face_resized = source_face_pil.resize(target_face_size, Image.LANCZOS)
-
-        # Replace target face with source face
-        target_array[target_top:target_bottom, target_left:target_right] = np.array(source_face_resized)
-
-        # Convert back to PIL Image
-        result_img = Image.fromarray(target_array)
-
-        # Save to bytes
-        output = io.BytesIO()
-        result_img.save(output, format="PNG")
-        return output.getvalue()
-    except Exception as e:
-        st.error(f"Error during face swap: {str(e)}")
-        return None
 
 def update_download_permission(folder, image_name, download_allowed):
     """Update download permission for an image."""
@@ -371,26 +323,6 @@ with st.sidebar:
                     st.rerun()
                 else:
                     st.error("Failed to swap image.")
-
-        st.subheader("Face Swap")
-        folder_choice_face = st.selectbox("Select Folder for Face Swap", [item["folder"] for item in data], key="face_folder")
-        images = get_images(folder_choice_face)
-        if images:
-            target_image = st.selectbox("Select Target Image", [img["name"] for img in images], key="face_target")
-            source_image = st.file_uploader("Upload Source Image (for face)", type=['jpg', 'jpeg', 'png'], key="face_upload")
-            if st.button("Perform Face Swap") and source_image:
-                target_img_data = next(img["data"] for img in images if img["name"] == target_image)
-                result_data = perform_face_swap(source_image.read(), target_img_data)
-                if result_data:
-                    conn = sqlite3.connect(DB_PATH)
-                    c = conn.cursor()
-                    new_filename = f"{uuid.uuid4()}.png"
-                    c.execute("INSERT INTO images (name, folder, image_data, download_allowed) VALUES (?, ?, ?, ?)",
-                              (new_filename, folder_choice_face, result_data, True))
-                    conn.commit()
-                    conn.close()
-                    st.success(f"Face-swapped image saved as '{new_filename}' in '{folder_choice_face}'!")
-                    st.rerun()
 
         st.subheader("Download Permissions")
         folder_choice_perm = st.selectbox("Select Folder for Download Settings", [item["folder"] for item in data], key=f"download_folder_{uuid.uuid4()}")
