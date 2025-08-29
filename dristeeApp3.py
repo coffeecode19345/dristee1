@@ -11,15 +11,13 @@ import json
 import git
 import requests
 from requests.exceptions import RequestException
-import traceback
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")  # Fallback for testing
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # GitHub personal access token
-REPO_URL = os.getenv("REPO_URL", "https://github.com/coffeecode19345/dristee1.git")  # Your repo URL
-
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+REPO_URL = os.getenv("REPO_URL", "https://github.com/coffeecode19345/dristee1.git")
 DB_PATH = "gallery.db"
 BACKUP_PATH = "data/db_backup.json"
 
@@ -28,18 +26,14 @@ BACKUP_PATH = "data/db_backup.json"
 # -------------------------------
 def _parse_github_repo_info(repo_url):
     """Return (owner, repo) from a repo url like https://github.com/owner/repo.git or git@github.com:owner/repo.git"""
-    import re
     if not repo_url:
         return None, None
-    # HTTP(S) form
     m = re.search(r'https?://[^/]+/([^/]+)/([^/]+?)(?:\.git)?$', repo_url)
     if m:
         return m.group(1), m.group(2)
-    # SSH form
     m = re.search(r'git@[^:]+:([^/]+)/([^/]+?)(?:\.git)?$', repo_url)
     if m:
         return m.group(1), m.group(2)
-    # maybe "owner/repo"
     parts = repo_url.strip().split('/')
     if len(parts) == 2:
         return parts[0], parts[1].replace('.git', '')
@@ -57,13 +51,10 @@ def serialize_db():
         "images": [],
         "surveys": []
     }
-    # Serialize folders
     c.execute("SELECT folder, name, age, profession, category FROM folders")
     data["folders"] = [{"folder": r[0], "name": r[1], "age": r[2], "profession": r[3], "category": r[4]} for r in c.fetchall()]
-    # Serialize images (convert image_data BLOB to base64)
     c.execute("SELECT name, folder, image_data, download_allowed FROM images")
     data["images"] = [{"name": r[0], "folder": r[1], "image_data": base64.b64encode(r[2]).decode('utf-8'), "download_allowed": r[3]} for r in c.fetchall()]
-    # Serialize surveys
     c.execute("SELECT folder, rating, feedback, timestamp FROM surveys")
     data["surveys"] = [{"folder": r[0], "rating": r[1], "feedback": r[2], "timestamp": r[3]} for r in c.fetchall()]
     conn.close()
@@ -75,28 +66,23 @@ def save_backup():
     os.makedirs(os.path.dirname(BACKUP_PATH), exist_ok=True)
     with open(BACKUP_PATH, "w") as f:
         json.dump(data, f)
-    commit_backup_api()  # Use API-based commit
-    # commit_backup()  # Uncomment to use GitPython instead
+    commit_backup_api()
 
 def restore_db():
     """Restore gallery.db from db_backup.json if it exists — robust to empty/corrupt backups."""
     if not os.path.exists(BACKUP_PATH):
         return
-
     try:
         with open(BACKUP_PATH, "r", encoding="utf-8") as f:
             raw = f.read()
         if not raw or not raw.strip():
             st.warning("Backup file exists but is empty — skipping restore.")
             return
-
         try:
             backup = json.loads(raw)
         except json.JSONDecodeError as e:
             st.error(f"Backup file is not valid JSON: {e}. Please check or regenerate {BACKUP_PATH}.")
             return
-
-        # Basic validation
         if not isinstance(backup, dict):
             st.error("Backup JSON root must be an object/dict. Aborting restore.")
             return
@@ -107,16 +93,13 @@ def restore_db():
             if not isinstance(backup[key], list):
                 st.error(f"Backup key '{key}' must be a list. Aborting restore.")
                 return
-
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         try:
             c.execute("BEGIN")
-            # Recreate schema
             c.execute("DROP TABLE IF EXISTS folders")
             c.execute("DROP TABLE IF EXISTS images")
             c.execute("DROP TABLE IF EXISTS surveys")
-
             c.execute("""
                 CREATE TABLE folders (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -147,8 +130,6 @@ def restore_db():
                     FOREIGN KEY(folder) REFERENCES folders(folder)
                 )
             """)
-
-            # Insert folders with per-row validation (skip bad rows)
             skipped = {"folders":0, "images":0, "surveys":0}
             for idx, fld in enumerate(backup["folders"]):
                 try:
@@ -164,8 +145,6 @@ def restore_db():
                 except Exception as e:
                     skipped["folders"] += 1
                     st.warning(f"Skipping malformed folder entry #{idx}: {e}")
-
-            # Insert images (expect base64 image_data)
             for idx, img in enumerate(backup["images"]):
                 try:
                     image_name = img["name"]
@@ -182,8 +161,6 @@ def restore_db():
                 except Exception as e:
                     skipped["images"] += 1
                     st.warning(f"Skipping malformed image entry #{idx} ({img.get('name')}): {e}")
-
-            # Insert surveys
             for idx, s in enumerate(backup["surveys"]):
                 try:
                     folder = s["folder"]
@@ -197,132 +174,104 @@ def restore_db():
                 except Exception as e:
                     skipped["surveys"] += 1
                     st.warning(f"Skipping malformed survey entry #{idx}: {e}")
-
             conn.commit()
             msg = f"Restore complete. Skipped: folders={skipped['folders']}, images={skipped['images']}, surveys={skipped['surveys']}."
             st.success(msg)
         except Exception as e:
             conn.rollback()
             st.error(f"Failed to restore database: {e}")
-            st.error(traceback.format_exc())
         finally:
             conn.close()
-
     except Exception as e:
         st.error(f"Unexpected error while restoring backup: {e}")
-        st.error(traceback.format_exc())
 
 def commit_backup_api():
     """Commit db_backup.json to GitHub using the GitHub API."""
     if not GITHUB_TOKEN:
-        st.error("GITHUB_TOKEN environment variable not set. Cannot commit to GitHub. Download db_backup.json manually.")
+        st.error("GITHUB_TOKEN is not set. Please add it to .env or Streamlit secrets. Download db_backup.json manually.")
+        return
+    if not GITHUB_TOKEN.startswith(("ghp_", "github_pat_")):
+        st.error("GITHUB_TOKEN is invalid (must start with 'ghp_' or 'github_pat_'). Please regenerate the token.")
         return
     if not REPO_URL:
-        st.error("REPO_URL environment variable not set. Cannot commit to GitHub.")
+        st.error("REPO_URL is not set. Please add it to .env or Streamlit secrets.")
         return
-
     try:
         owner, repo = _parse_github_repo_info(REPO_URL)
         if not owner or not repo:
-            st.error(f"Invalid REPO_URL: {REPO_URL}. Cannot parse owner and repo.")
+            st.error(f"Invalid REPO_URL: {REPO_URL}. Must be like 'https://github.com/owner/repo.git'.")
             return
-
-        # Read db_backup.json
         with open(BACKUP_PATH, "r", encoding="utf-8") as f:
             content = f.read()
         if not content.strip():
             st.warning("db_backup.json is empty. Skipping commit.")
             return
         content_b64 = base64.b64encode(content.encode('utf-8')).decode('utf-8')
-
-        # GitHub API headers
         headers = {
             "Authorization": f"token {GITHUB_TOKEN}",
             "Accept": "application/vnd.github.v3+json",
-            "User-Agent": "Streamlit-Gallery-App"  # Required by GitHub API
+            "User-Agent": "Streamlit-Dristee1-App"
         }
-
-        # Test authentication
-        try:
-            auth_test = requests.get("https://api.github.com/user", headers=headers)
-            auth_test.raise_for_status()
-            st.info(f"Authenticated as GitHub user: {auth_test.json().get('login')}")
-        except RequestException as e:
-            st.error(f"Authentication failed: {str(e)}")
+        auth_test = requests.get("https://api.github.com/user", headers=headers)
+        if auth_test.status_code != 200:
             if auth_test.status_code == 401:
-                st.error("Invalid or expired GITHUB_TOKEN. Please regenerate the token with 'repo' scope.")
+                st.error("Authentication failed: Invalid or expired GITHUB_TOKEN. Regenerate with 'repo' scope at https://github.com/settings/tokens.")
             elif auth_test.status_code == 403:
-                st.error("Token lacks permissions or GitHub rate limit exceeded. Check token scopes or wait and try again.")
-            st.error(traceback.format_exc())
-            return
-
-        # Get the current file SHA (if it exists)
-        sha = None
-        try:
-            response = requests.get(
-                f"https://api.github.com/repos/{owner}/{repo}/contents/{BACKUP_PATH}",
-                headers=headers
-            )
-            response.raise_for_status()
-            sha = response.json().get("sha")
-        except RequestException as e:
-            if response.status_code == 404:
-                st.info(f"{BACKUP_PATH} does not exist in repository. Will create a new file.")
+                st.error("Authentication failed: Token lacks permissions or GitHub rate limit exceeded. Ensure 'repo' scope is enabled.")
             else:
-                st.error(f"Failed to check existing {BACKUP_PATH}: {str(e)}")
-                st.error(traceback.format_exc())
-                return
-
-        # Commit the file
+                st.error(f"Authentication failed: {auth_test.status_code} {auth_test.reason}. Response: {auth_test.text}")
+            return
+        st.info(f"Authenticated as GitHub user: {auth_test.json().get('login')}")
+        sha = None
+        response = requests.get(
+            f"https://api.github.com/repos/{owner}/{repo}/contents/{BACKUP_PATH}",
+            headers=headers
+        )
+        if response.status_code == 200:
+            sha = response.json().get("sha")
+        elif response.status_code == 404:
+            st.info(f"{BACKUP_PATH} does not exist in repository. Creating new file.")
+        else:
+            st.error(f"Failed to check {BACKUP_PATH}: {response.status_code} {response.reason}. Response: {response.text}")
+            return
         payload = {
-            "message": "Update db_backup.json",
+            "message": f"Update db_backup.json {datetime.now().isoformat()}",
             "content": content_b64,
-            "branch": "main"  # Adjust to 'master' if your default branch is different
+            "branch": "main"
         }
         if sha:
             payload["sha"] = sha
-
         response = requests.put(
             f"https://api.github.com/repos/{owner}/{repo}/contents/{BACKUP_PATH}",
             headers=headers,
             json=payload
         )
-        response.raise_for_status()
-        st.success(f"Successfully committed {BACKUP_PATH} to GitHub! Commit SHA: {response.json().get('commit', {}).get('sha')}")
-    except RequestException as e:
-        st.error(f"Failed to commit {BACKUP_PATH} to GitHub: {str(e)}")
-        if response.status_code == 401:
-            st.error("401 Unauthorized: Invalid or expired GITHUB_TOKEN. Regenerate with 'repo' scope.")
-        elif response.status_code == 403:
-            st.error("403 Forbidden: Check token permissions or rate limits. Ensure token has 'repo' scope.")
-        elif response.status_code == 404:
-            st.error(f"404 Not Found: Repository {owner}/{repo} does not exist or is inaccessible.")
-        st.error(traceback.format_exc())
+        if response.status_code in (200, 201):
+            st.success(f"Successfully committed {BACKUP_PATH} to GitHub! Commit SHA: {response.json().get('commit', {}).get('sha')}")
+        else:
+            st.error(f"Failed to commit {BACKUP_PATH}: {response.status_code} {response.reason}. Response: {response.text}")
     except Exception as e:
-        st.error(f"Unexpected error during GitHub API commit: {str(e)}")
-        st.error(traceback.format_exc())
+        st.error(f"Unexpected error during GitHub commit: {str(e)}")
+        if "response" in locals():
+            st.error(f"Response: {response.text}")
 
 def commit_backup():
     """Commit db_backup.json to GitHub repository using GitPython (fallback)."""
     if not GITHUB_TOKEN:
-        st.warning("GITHUB_TOKEN environment variable not set. Cannot commit to GitHub. Download db_backup.json manually.")
+        st.error("GITHUB_TOKEN is not set. Please add it to .env or Streamlit secrets. Download db_backup.json manually.")
         return
     try:
         repo = git.Repo(".")
-        # Configure Git user
         repo.config_writer().set_value("user", "name", "Streamlit App").release()
         repo.config_writer().set_value("user", "email", "streamlit@app.com").release()
-        # Add and commit db_backup.json
         repo.index.add([BACKUP_PATH])
         repo.index.commit("Update db_backup.json")
-        # Configure remote with token
         origin = repo.remote(name="origin")
         origin.set_url(f"https://{GITHUB_TOKEN}@{REPO_URL.replace('https://', '')}")
         origin.push()
         st.success("Successfully committed db_backup.json to GitHub!")
     except Exception as e:
         st.error(f"Failed to commit backup to GitHub: {str(e)}")
-        st.error(traceback.format_exc())
 
 # -------------------------------
 # Helper Functions
@@ -344,7 +293,7 @@ def validate_folder_name(folder):
 
 def init_db():
     """Initialize SQLite database and restore from backup if available."""
-    restore_db()  # Restore from db_backup.json if it exists
+    restore_db()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""
@@ -391,7 +340,7 @@ def init_db():
                   folder_data["profession"], folder_data["category"]))
     conn.commit()
     conn.close()
-    save_backup()  # Save backup after initialization
+    save_backup()
 
 def load_folders(search_query=""):
     """Load folders from database, optionally filtered by search query."""
@@ -417,7 +366,7 @@ def add_folder(folder, name, age, profession, category):
         """, (folder, name, age, profession, category))
         conn.commit()
         conn.close()
-        save_backup()  # Save backup after adding folder
+        save_backup()
         return True
     except sqlite3.IntegrityError:
         st.error(f"Folder '{folder}' already exists.")
@@ -432,10 +381,10 @@ def load_images_to_db(uploaded_files, folder, download_allowed=True):
     c = conn.cursor()
     for uploaded_file in uploaded_files:
         img = Image.open(uploaded_file)
-        img = img.convert("RGB")  # Ensure consistent format
-        img.thumbnail((800, 800))  # Resize to max 800x800
+        img = img.convert("RGB")
+        img.thumbnail((800, 800))
         output = io.BytesIO()
-        img.save(output, format="JPEG", quality=85)  # Compress to JPEG
+        img.save(output, format="JPEG", quality=85)
         image_data = output.getvalue()
         extension = ".jpg"
         random_filename = f"{uuid.uuid4()}{extension}"
@@ -445,7 +394,7 @@ def load_images_to_db(uploaded_files, folder, download_allowed=True):
                       (random_filename, folder, image_data, download_allowed))
     conn.commit()
     conn.close()
-    save_backup()  # Save backup after uploading images
+    save_backup()
 
 def swap_image(folder, old_image_name, new_image_file):
     """Replace an existing image with a new uploaded image."""
@@ -462,7 +411,7 @@ def swap_image(folder, old_image_name, new_image_file):
                   (new_image_data, folder, old_image_name))
         conn.commit()
         conn.close()
-        save_backup()  # Save backup after swapping image
+        save_backup()
         return True
     except Exception as e:
         st.error(f"Error swapping image: {str(e)}")
@@ -476,7 +425,7 @@ def update_download_permission(folder, image_name, download_allowed):
               (download_allowed, folder, image_name))
     conn.commit()
     conn.close()
-    save_backup()  # Save backup after updating permissions
+    save_backup()
 
 def delete_image(folder, name):
     """Delete an image from the database."""
@@ -485,7 +434,7 @@ def delete_image(folder, name):
     c.execute("DELETE FROM images WHERE folder = ? AND name = ?", (folder, name))
     conn.commit()
     conn.close()
-    save_backup()  # Save backup after deleting image
+    save_backup()
 
 def load_survey_data():
     """Load survey data from database."""
@@ -509,7 +458,7 @@ def save_survey_data(folder, rating, feedback, timestamp):
               (folder, rating, feedback, timestamp))
     conn.commit()
     conn.close()
-    save_backup()  # Save backup after saving survey
+    save_backup()
 
 def delete_survey_entry(folder, timestamp):
     """Delete a survey entry from database."""
@@ -518,7 +467,7 @@ def delete_survey_entry(folder, timestamp):
     c.execute("DELETE FROM surveys WHERE folder = ? AND timestamp = ?", (folder, timestamp))
     conn.commit()
     conn.close()
-    save_backup()  # Save backup after deleting survey
+    save_backup()
 
 def get_images(folder):
     """Get images from database for a folder."""
@@ -554,7 +503,6 @@ def display_rating_chart(survey_data, folders):
             avg_rating = sum(entry["rating"] for entry in survey_data[f["folder"]]) / len(survey_data[f["folder"]])
             ratings.append(avg_rating)
             folder_names.append(f["name"])
-    
     if ratings:
         st.markdown("### Average Ratings per Folder")
         chart_config = {
@@ -608,7 +556,6 @@ with st.sidebar:
         st.session_state.is_author = False
         st.success("Logged out")
         st.rerun()
-
     if st.session_state.is_author:
         st.subheader("Manage Folders & Images")
         with st.form(key="add_folder_form"):
@@ -626,7 +573,6 @@ with st.sidebar:
                         st.error("Failed to add folder. Check input or try a different folder name.")
                 else:
                     st.error("Please fill in all fields.")
-
         st.subheader("Upload Images")
         data = load_folders()
         folder_choice = st.selectbox("Select Folder", [item["folder"] for item in data], key="upload_folder")
@@ -638,7 +584,6 @@ with st.sidebar:
             load_images_to_db(uploaded_files, folder_choice, download_allowed)
             st.success(f"{len(uploaded_files)} image(s) uploaded to '{folder_choice}'!")
             st.rerun()
-
         st.subheader("Image Swap")
         folder_choice_swap = st.selectbox("Select Folder for Image Swap", [item["folder"] for item in data], key="swap_folder")
         images = get_images(folder_choice_swap)
@@ -651,7 +596,6 @@ with st.sidebar:
                     st.rerun()
                 else:
                     st.error("Failed to swap image.")
-
         st.subheader("Download Permissions")
         folder_choice_perm = st.selectbox("Select Folder for Download Settings", [item["folder"] for item in data], key=f"download_folder_{uuid.uuid4()}")
         images = get_images(folder_choice_perm)
@@ -672,8 +616,6 @@ with st.sidebar:
                             update_download_permission(folder_choice_perm, img_dict["name"], download_states[img_dict['name']])
                     st.success("Download permissions updated!")
                     st.rerun()
-
-        # Add a download button for db_backup.json (manual backup)
         if os.path.exists(BACKUP_PATH):
             with open(BACKUP_PATH, "rb") as f:
                 st.download_button(
@@ -699,15 +641,10 @@ img {border-radius:4px; pointer-events: none; user-select: none;}
 # Main App UI
 # -------------------------------
 st.title("📸 Interactive Photo Gallery & Survey")
-
-# Search Bar
 search_query = st.text_input("Search by name, folder, profession, or category")
 data = load_folders(search_query)
 survey_data = load_survey_data()
-
-# Display Rating Chart
 display_rating_chart(survey_data, data)
-
 categories = sorted(set(item["category"] for item in data))
 tabs = st.tabs(categories)
 
@@ -722,7 +659,6 @@ if st.session_state.zoom_folder is None:
                     f'{f["name"]} ({f["age"]}, {f["profession"]})</div>',
                     unsafe_allow_html=True
                 )
-
                 images = get_images(f["folder"])
                 if images:
                     cols = st.columns(4)
@@ -735,7 +671,6 @@ if st.session_state.zoom_folder is None:
                             st.image(img_dict["thumbnail"], use_container_width=True)
                 else:
                     st.warning(f"No images found for {f['folder']}")
-
                 with st.expander(f"📝 Survey for {f['name']}"):
                     with st.form(key=f"survey_form_{f['folder']}"):
                         rating = st.slider("Rating (1-5)", 1, 5, 3, key=f"rating_{f['folder']}")
@@ -745,7 +680,6 @@ if st.session_state.zoom_folder is None:
                             save_survey_data(f["folder"], rating, feedback, timestamp)
                             st.success("✅ Response recorded")
                             st.rerun()
-
                     if f["folder"] in survey_data and survey_data[f["folder"]]:
                         st.write("### 📊 Previous Feedback:")
                         ratings = [entry['rating'] for entry in survey_data[f["folder"]]]
@@ -778,10 +712,8 @@ else:
         idx = 0
         st.session_state.zoom_index = 0
     img_dict = images[idx]
-
     st.subheader(f"🔍 Viewing {folder} ({idx+1}/{len(images)})")
     st.image(img_dict["image"], use_container_width=True)
-
     col1, col2, col3 = st.columns([1, 8, 1])
     with col1:
         if idx > 0 and st.button("◄ Previous", key=f"prev_{folder}"):
@@ -791,11 +723,9 @@ else:
         if idx < len(images) - 1 and st.button("Next ►", key=f"next_{folder}"):
             st.session_state.zoom_index += 1
             st.rerun()
-
     if img_dict["download"]:
         mime = "image/jpeg" if img_dict["name"].lower().endswith(('.jpg', '.jpeg')) else "image/png"
         st.download_button("⬇️ Download", data=img_dict["data"], file_name=img_dict["name"], mime=mime)
-
     if st.session_state.is_author:
         if st.button("🗑️ Delete Image", key=f"delete_{folder}_{img_dict['name']}"):
             delete_image(folder, img_dict["name"])
@@ -805,7 +735,6 @@ else:
                 st.session_state.zoom_folder = None
                 st.session_state.zoom_index = 0
             st.rerun()
-
     if st.button("⬅️ Back to Grid", key=f"back_{folder}"):
         st.session_state.zoom_folder = None
         st.session_state.zoom_index = 0
