@@ -10,7 +10,6 @@ import base64
 import json
 import git
 import requests
-from requests.exceptions import RequestException
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -71,12 +70,13 @@ def save_backup():
 def restore_db():
     """Restore gallery.db from db_backup.json if it exists — robust to empty/corrupt backups."""
     if not os.path.exists(BACKUP_PATH):
+        st.info(f"No backup file found at {BACKUP_PATH}. Starting with a fresh database.")
         return
     try:
         with open(BACKUP_PATH, "r", encoding="utf-8") as f:
             raw = f.read()
         if not raw or not raw.strip():
-            st.warning("Backup file exists but is empty — skipping restore.")
+            st.warning(f"Backup file {BACKUP_PATH} exists but is empty. Add folders or images to populate the database.")
             return
         try:
             backup = json.loads(raw)
@@ -191,10 +191,13 @@ def commit_backup_api():
         st.error("GITHUB_TOKEN is not set. Please add it to .env or Streamlit secrets. Download db_backup.json manually.")
         return
     if not GITHUB_TOKEN.startswith(("ghp_", "github_pat_")):
-        st.error("GITHUB_TOKEN is invalid (must start with 'ghp_' or 'github_pat_'). Please regenerate the token.")
+        st.error("GITHUB_TOKEN is invalid (must start with 'ghp_' or 'github_pat_'). Regenerate at https://github.com/settings/tokens.")
         return
     if not REPO_URL:
         st.error("REPO_URL is not set. Please add it to .env or Streamlit secrets.")
+        return
+    if not os.path.exists(BACKUP_PATH):
+        st.warning(f"{BACKUP_PATH} does not exist. Initialize the database by adding folders or images.")
         return
     try:
         owner, repo = _parse_github_repo_info(REPO_URL)
@@ -204,7 +207,7 @@ def commit_backup_api():
         with open(BACKUP_PATH, "r", encoding="utf-8") as f:
             content = f.read()
         if not content.strip():
-            st.warning("db_backup.json is empty. Skipping commit.")
+            st.warning("db_backup.json is empty. Add folders or images to populate the database.")
             return
         content_b64 = base64.b64encode(content.encode('utf-8')).decode('utf-8')
         headers = {
@@ -215,9 +218,10 @@ def commit_backup_api():
         auth_test = requests.get("https://api.github.com/user", headers=headers)
         if auth_test.status_code != 200:
             if auth_test.status_code == 401:
-                st.error("Authentication failed: Invalid or expired GITHUB_TOKEN. Regenerate with 'repo' scope at https://github.com/settings/tokens.")
+                st.error("Authentication failed: Invalid or expired GITHUB_TOKEN. Regenerate with 'Contents: Read and write' permission at https://github.com/settings/tokens.")
             elif auth_test.status_code == 403:
-                st.error("Authentication failed: Token lacks permissions or GitHub rate limit exceeded. Ensure 'repo' scope is enabled.")
+                st.error("Authentication failed: Token lacks permissions for coffeecode19345/dristee1 or rate limit exceeded. Ensure 'Contents: Read and write' is enabled.")
+                st.error("Check rate limit: curl -H 'Authorization: token <GITHUB_TOKEN>' https://api.github.com/rate_limit")
             else:
                 st.error(f"Authentication failed: {auth_test.status_code} {auth_test.reason}. Response: {auth_test.text}")
             return
@@ -250,6 +254,8 @@ def commit_backup_api():
             st.success(f"Successfully committed {BACKUP_PATH} to GitHub! Commit SHA: {response.json().get('commit', {}).get('sha')}")
         else:
             st.error(f"Failed to commit {BACKUP_PATH}: {response.status_code} {response.reason}. Response: {response.text}")
+            if response.status_code == 403:
+                st.error("Check token permissions or rate limits. Run: curl -H 'Authorization: token <GITHUB_TOKEN>' https://api.github.com/rate_limit")
     except Exception as e:
         st.error(f"Unexpected error during GitHub commit: {str(e)}")
         if "response" in locals():
