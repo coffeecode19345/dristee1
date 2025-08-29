@@ -9,7 +9,7 @@ import re
 import base64
 import json
 import git
-import requests  # Added for GitHub API
+import requests
 from requests.exceptions import RequestException
 import traceback
 from dotenv import load_dotenv
@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 load_dotenv()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")  # Fallback for testing
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # GitHub personal access token
-REPO_URL = os.getenv("REPO_URL", "https://github.com/your_username/your_repo.git")  # Replace with your repo URL
+REPO_URL = os.getenv("REPO_URL", "https://github.com/coffeecode19345/dristee1.git")  # Your repo URL
 
 DB_PATH = "gallery.db"
 BACKUP_PATH = "data/db_backup.json"
@@ -75,7 +75,7 @@ def save_backup():
     os.makedirs(os.path.dirname(BACKUP_PATH), exist_ok=True)
     with open(BACKUP_PATH, "w") as f:
         json.dump(data, f)
-    commit_backup_api()  # Use API-based commit (preferred)
+    commit_backup_api()  # Use API-based commit
     # commit_backup()  # Uncomment to use GitPython instead
 
 def restore_db():
@@ -212,10 +212,100 @@ def restore_db():
         st.error(f"Unexpected error while restoring backup: {e}")
         st.error(traceback.format_exc())
 
-def commit_backup():
-    """Commit db_backup.json to GitHub repository using GitPython."""
+def commit_backup_api():
+    """Commit db_backup.json to GitHub using the GitHub API."""
     if not GITHUB_TOKEN:
-        st.warning("GitHub token not provided; db_backup.json not committed. Download manually to persist changes.")
+        st.error("GITHUB_TOKEN environment variable not set. Cannot commit to GitHub. Download db_backup.json manually.")
+        return
+    if not REPO_URL:
+        st.error("REPO_URL environment variable not set. Cannot commit to GitHub.")
+        return
+
+    try:
+        owner, repo = _parse_github_repo_info(REPO_URL)
+        if not owner or not repo:
+            st.error(f"Invalid REPO_URL: {REPO_URL}. Cannot parse owner and repo.")
+            return
+
+        # Read db_backup.json
+        with open(BACKUP_PATH, "r", encoding="utf-8") as f:
+            content = f.read()
+        if not content.strip():
+            st.warning("db_backup.json is empty. Skipping commit.")
+            return
+        content_b64 = base64.b64encode(content.encode('utf-8')).decode('utf-8')
+
+        # GitHub API headers
+        headers = {
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "Streamlit-Gallery-App"  # Required by GitHub API
+        }
+
+        # Test authentication
+        try:
+            auth_test = requests.get("https://api.github.com/user", headers=headers)
+            auth_test.raise_for_status()
+            st.info(f"Authenticated as GitHub user: {auth_test.json().get('login')}")
+        except RequestException as e:
+            st.error(f"Authentication failed: {str(e)}")
+            if auth_test.status_code == 401:
+                st.error("Invalid or expired GITHUB_TOKEN. Please regenerate the token with 'repo' scope.")
+            elif auth_test.status_code == 403:
+                st.error("Token lacks permissions or GitHub rate limit exceeded. Check token scopes or wait and try again.")
+            st.error(traceback.format_exc())
+            return
+
+        # Get the current file SHA (if it exists)
+        sha = None
+        try:
+            response = requests.get(
+                f"https://api.github.com/repos/{owner}/{repo}/contents/{BACKUP_PATH}",
+                headers=headers
+            )
+            response.raise_for_status()
+            sha = response.json().get("sha")
+        except RequestException as e:
+            if response.status_code == 404:
+                st.info(f"{BACKUP_PATH} does not exist in repository. Will create a new file.")
+            else:
+                st.error(f"Failed to check existing {BACKUP_PATH}: {str(e)}")
+                st.error(traceback.format_exc())
+                return
+
+        # Commit the file
+        payload = {
+            "message": "Update db_backup.json",
+            "content": content_b64,
+            "branch": "main"  # Adjust to 'master' if your default branch is different
+        }
+        if sha:
+            payload["sha"] = sha
+
+        response = requests.put(
+            f"https://api.github.com/repos/{owner}/{repo}/contents/{BACKUP_PATH}",
+            headers=headers,
+            json=payload
+        )
+        response.raise_for_status()
+        st.success(f"Successfully committed {BACKUP_PATH} to GitHub! Commit SHA: {response.json().get('commit', {}).get('sha')}")
+    except RequestException as e:
+        st.error(f"Failed to commit {BACKUP_PATH} to GitHub: {str(e)}")
+        if response.status_code == 401:
+            st.error("401 Unauthorized: Invalid or expired GITHUB_TOKEN. Regenerate with 'repo' scope.")
+        elif response.status_code == 403:
+            st.error("403 Forbidden: Check token permissions or rate limits. Ensure token has 'repo' scope.")
+        elif response.status_code == 404:
+            st.error(f"404 Not Found: Repository {owner}/{repo} does not exist or is inaccessible.")
+        st.error(traceback.format_exc())
+    except Exception as e:
+        st.error(f"Unexpected error during GitHub API commit: {str(e)}")
+        st.error(traceback.format_exc())
+
+def commit_backup():
+    """Commit db_backup.json to GitHub repository using GitPython (fallback)."""
+    if not GITHUB_TOKEN:
+        st.warning("GITHUB_TOKEN environment variable not set. Cannot commit to GitHub. Download db_backup.json manually.")
         return
     try:
         repo = git.Repo(".")
@@ -232,62 +322,6 @@ def commit_backup():
         st.success("Successfully committed db_backup.json to GitHub!")
     except Exception as e:
         st.error(f"Failed to commit backup to GitHub: {str(e)}")
-        st.error(traceback.format_exc())
-
-def commit_backup_api():
-    """Commit db_backup.json to GitHub using the GitHub API."""
-    if not GITHUB_TOKEN:
-        st.warning("GitHub token not provided; db_backup.json not committed. Download manually to persist changes.")
-        return
-    try:
-        owner, repo = _parse_github_repo_info(REPO_URL)
-        if not owner or not repo:
-            st.error(f"Invalid REPO_URL: {REPO_URL}. Cannot parse owner and repo.")
-            return
-
-        # Read db_backup.json
-        with open(BACKUP_PATH, "r", encoding="utf-8") as f:
-            content = f.read()
-        content_b64 = base64.b64encode(content.encode('utf-8')).decode('utf-8')
-
-        # GitHub API headers
-        headers = {
-            "Authorization": f"token {GITHUB_TOKEN}",
-            "Accept": "application/vnd.github.v3+json"
-        }
-
-        # Get the current file SHA (if it exists)
-        sha = None
-        try:
-            response = requests.get(
-                f"https://api.github.com/repos/{owner}/{repo}/contents/{BACKUP_PATH}",
-                headers=headers
-            )
-            response.raise_for_status()
-            sha = response.json().get("sha")
-        except RequestException as e:
-            if response.status_code != 404:
-                st.error(f"Failed to check existing {BACKUP_PATH}: {str(e)}")
-                return
-
-        # Commit the file
-        payload = {
-            "message": "Update db_backup.json",
-            "content": content_b64,
-            "branch": "main"  # Adjust if your default branch is different (e.g., "master")
-        }
-        if sha:
-            payload["sha"] = sha
-
-        response = requests.put(
-            f"https://api.github.com/repos/{owner}/{repo}/contents/{BACKUP_PATH}",
-            headers=headers,
-            json=payload
-        )
-        response.raise_for_status()
-        st.success("Successfully committed db_backup.json to GitHub via API!")
-    except RequestException as e:
-        st.error(f"Failed to commit backup to GitHub via API: {str(e)}")
         st.error(traceback.format_exc())
 
 # -------------------------------
