@@ -14,7 +14,8 @@ from dotenv import load_dotenv
 # Load environment variables for secure password and GitHub token
 load_dotenv()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")  # Fallback for testing
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Optional, for automated Git commits
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # GitHub personal access token
+REPO_URL = os.getenv("REPO_URL", "https://github.com/your_username/your_repo.git")  # Replace with your repo URL
 
 DB_PATH = "gallery.db"
 BACKUP_PATH = "data/db_backup.json"
@@ -49,7 +50,7 @@ def save_backup():
     os.makedirs(os.path.dirname(BACKUP_PATH), exist_ok=True)
     with open(BACKUP_PATH, "w") as f:
         json.dump(data, f)
-    commit_backup()  # Optional: Commit to GitHub
+    commit_backup()  # Commit to GitHub
 
 def restore_db():
     """Restore gallery.db from db_backup.json if it exists."""
@@ -118,17 +119,25 @@ def restore_db():
             st.error(f"Error restoring database from backup: {str(e)}")
 
 def commit_backup():
-    """Commit db_backup.json to GitHub repository (optional)."""
-    if GITHUB_TOKEN:
-        try:
-            repo = git.Repo(".")
-            repo.index.add([BACKUP_PATH])
-            repo.index.commit("Update db_backup.json")
-            repo.git.push(f"https://{GITHUB_TOKEN}@github.com/your_username/your_repo.git")
-        except Exception as e:
-            st.warning(f"Failed to commit backup to GitHub: {str(e)}")
-    else:
+    """Commit db_backup.json to GitHub repository."""
+    if not GITHUB_TOKEN:
         st.warning("GitHub token not provided; db_backup.json not committed. Download manually to persist changes.")
+        return
+    try:
+        repo = git.Repo(".")
+        # Configure Git user if not already set
+        repo.config_writer().set_value("user", "name", "Streamlit App").release()
+        repo.config_writer().set_value("user", "email", "streamlit@app.com").release()
+        # Add and commit db_backup.json
+        repo.index.add([BACKUP_PATH])
+        repo.index.commit("Update db_backup.json")
+        # Configure remote with token
+        origin = repo.remote(name="origin")
+        origin.set_url(f"https://{GITHUB_TOKEN}@{REPO_URL.replace('https://', '')}")
+        origin.push()
+        st.success("Successfully committed db_backup.json to GitHub!")
+    except Exception as e:
+        st.error(f"Failed to commit backup to GitHub: {str(e)}")
 
 # -------------------------------
 # Helper Functions
@@ -469,7 +478,7 @@ with st.sidebar:
                     st.success("Download permissions updated!")
                     st.rerun()
 
-        # Add a download button for db_backup.json (optional, for manual backup)
+        # Add a download button for db_backup.json (manual backup)
         if os.path.exists(BACKUP_PATH):
             with open(BACKUP_PATH, "rb") as f:
                 st.download_button(
