@@ -9,9 +9,12 @@ import re
 import base64
 import json
 import git
+import requests  # Added for GitHub API
+from requests.exceptions import RequestException
+import traceback
 from dotenv import load_dotenv
 
-# Load environment variables for secure password and GitHub token
+# Load environment variables
 load_dotenv()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")  # Fallback for testing
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # GitHub personal access token
@@ -19,6 +22,28 @@ REPO_URL = os.getenv("REPO_URL", "https://github.com/your_username/your_repo.git
 
 DB_PATH = "gallery.db"
 BACKUP_PATH = "data/db_backup.json"
+
+# -------------------------------
+# GitHub Helper Function
+# -------------------------------
+def _parse_github_repo_info(repo_url):
+    """Return (owner, repo) from a repo url like https://github.com/owner/repo.git or git@github.com:owner/repo.git"""
+    import re
+    if not repo_url:
+        return None, None
+    # HTTP(S) form
+    m = re.search(r'https?://[^/]+/([^/]+)/([^/]+?)(?:\.git)?$', repo_url)
+    if m:
+        return m.group(1), m.group(2)
+    # SSH form
+    m = re.search(r'git@[^:]+:([^/]+)/([^/]+?)(?:\.git)?$', repo_url)
+    if m:
+        return m.group(1), m.group(2)
+    # maybe "owner/repo"
+    parts = repo_url.strip().split('/')
+    if len(parts) == 2:
+        return parts[0], parts[1].replace('.git', '')
+    return None, None
 
 # -------------------------------
 # Backup and Restore Functions
@@ -50,21 +75,48 @@ def save_backup():
     os.makedirs(os.path.dirname(BACKUP_PATH), exist_ok=True)
     with open(BACKUP_PATH, "w") as f:
         json.dump(data, f)
-    commit_backup()  # Commit to GitHub
+    commit_backup_api()  # Use API-based commit (preferred)
+    # commit_backup()  # Uncomment to use GitPython instead
 
 def restore_db():
-    """Restore gallery.db from db_backup.json if it exists."""
-    if os.path.exists(BACKUP_PATH):
+    """Restore gallery.db from db_backup.json if it exists — robust to empty/corrupt backups."""
+    if not os.path.exists(BACKUP_PATH):
+        return
+
+    try:
+        with open(BACKUP_PATH, "r", encoding="utf-8") as f:
+            raw = f.read()
+        if not raw or not raw.strip():
+            st.warning("Backup file exists but is empty — skipping restore.")
+            return
+
         try:
-            with open(BACKUP_PATH, "r") as f:
-                backup = json.load(f)
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            # Clear existing tables
+            backup = json.loads(raw)
+        except json.JSONDecodeError as e:
+            st.error(f"Backup file is not valid JSON: {e}. Please check or regenerate {BACKUP_PATH}.")
+            return
+
+        # Basic validation
+        if not isinstance(backup, dict):
+            st.error("Backup JSON root must be an object/dict. Aborting restore.")
+            return
+        for key in ("folders", "images", "surveys"):
+            if key not in backup:
+                st.error(f"Backup missing required key '{key}'. Aborting restore.")
+                return
+            if not isinstance(backup[key], list):
+                st.error(f"Backup key '{key}' must be a list. Aborting restore.")
+                return
+
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        try:
+            c.execute("BEGIN")
+            # Recreate schema
             c.execute("DROP TABLE IF EXISTS folders")
             c.execute("DROP TABLE IF EXISTS images")
             c.execute("DROP TABLE IF EXISTS surveys")
-            # Recreate tables
+
             c.execute("""
                 CREATE TABLE folders (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -95,37 +147,79 @@ def restore_db():
                     FOREIGN KEY(folder) REFERENCES folders(folder)
                 )
             """)
-            # Restore folders
-            for folder in backup["folders"]:
-                c.execute("""
-                    INSERT INTO folders (folder, name, age, profession, category)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (folder["folder"], folder["name"], folder["age"], folder["profession"], folder["category"]))
-            # Restore images
-            for img in backup["images"]:
-                c.execute("""
-                    INSERT INTO images (name, folder, image_data, download_allowed)
-                    VALUES (?, ?, ?, ?)
-                """, (img["name"], img["folder"], base64.b64decode(img["image_data"]), img["download_allowed"]))
-            # Restore surveys
-            for survey in backup["surveys"]:
-                c.execute("""
-                    INSERT INTO surveys (folder, rating, feedback, timestamp)
-                    VALUES (?, ?, ?, ?)
-                """, (survey["folder"], survey["rating"], survey["feedback"], survey["timestamp"]))
+
+            # Insert folders with per-row validation (skip bad rows)
+            skipped = {"folders":0, "images":0, "surveys":0}
+            for idx, fld in enumerate(backup["folders"]):
+                try:
+                    folder = fld["folder"]
+                    name = fld["name"]
+                    age = int(fld["age"])
+                    profession = fld["profession"]
+                    category = fld["category"]
+                    c.execute(
+                        "INSERT INTO folders (folder, name, age, profession, category) VALUES (?, ?, ?, ?, ?)",
+                        (folder, name, age, profession, category)
+                    )
+                except Exception as e:
+                    skipped["folders"] += 1
+                    st.warning(f"Skipping malformed folder entry #{idx}: {e}")
+
+            # Insert images (expect base64 image_data)
+            for idx, img in enumerate(backup["images"]):
+                try:
+                    image_name = img["name"]
+                    folder = img["folder"]
+                    img_b64 = img.get("image_data")
+                    if not isinstance(img_b64, str) or not img_b64.strip():
+                        raise ValueError("image_data is missing or not a base64 string")
+                    image_bytes = base64.b64decode(img_b64)
+                    download_allowed = int(img.get("download_allowed", 1))
+                    c.execute(
+                        "INSERT INTO images (name, folder, image_data, download_allowed) VALUES (?, ?, ?, ?)",
+                        (image_name, folder, image_bytes, download_allowed)
+                    )
+                except Exception as e:
+                    skipped["images"] += 1
+                    st.warning(f"Skipping malformed image entry #{idx} ({img.get('name')}): {e}")
+
+            # Insert surveys
+            for idx, s in enumerate(backup["surveys"]):
+                try:
+                    folder = s["folder"]
+                    rating = int(s["rating"])
+                    feedback = s.get("feedback")
+                    timestamp = s["timestamp"]
+                    c.execute(
+                        "INSERT INTO surveys (folder, rating, feedback, timestamp) VALUES (?, ?, ?, ?)",
+                        (folder, rating, feedback, timestamp)
+                    )
+                except Exception as e:
+                    skipped["surveys"] += 1
+                    st.warning(f"Skipping malformed survey entry #{idx}: {e}")
+
             conn.commit()
-            conn.close()
+            msg = f"Restore complete. Skipped: folders={skipped['folders']}, images={skipped['images']}, surveys={skipped['surveys']}."
+            st.success(msg)
         except Exception as e:
-            st.error(f"Error restoring database from backup: {str(e)}")
+            conn.rollback()
+            st.error(f"Failed to restore database: {e}")
+            st.error(traceback.format_exc())
+        finally:
+            conn.close()
+
+    except Exception as e:
+        st.error(f"Unexpected error while restoring backup: {e}")
+        st.error(traceback.format_exc())
 
 def commit_backup():
-    """Commit db_backup.json to GitHub repository."""
+    """Commit db_backup.json to GitHub repository using GitPython."""
     if not GITHUB_TOKEN:
         st.warning("GitHub token not provided; db_backup.json not committed. Download manually to persist changes.")
         return
     try:
         repo = git.Repo(".")
-        # Configure Git user if not already set
+        # Configure Git user
         repo.config_writer().set_value("user", "name", "Streamlit App").release()
         repo.config_writer().set_value("user", "email", "streamlit@app.com").release()
         # Add and commit db_backup.json
@@ -138,6 +232,63 @@ def commit_backup():
         st.success("Successfully committed db_backup.json to GitHub!")
     except Exception as e:
         st.error(f"Failed to commit backup to GitHub: {str(e)}")
+        st.error(traceback.format_exc())
+
+def commit_backup_api():
+    """Commit db_backup.json to GitHub using the GitHub API."""
+    if not GITHUB_TOKEN:
+        st.warning("GitHub token not provided; db_backup.json not committed. Download manually to persist changes.")
+        return
+    try:
+        owner, repo = _parse_github_repo_info(REPO_URL)
+        if not owner or not repo:
+            st.error(f"Invalid REPO_URL: {REPO_URL}. Cannot parse owner and repo.")
+            return
+
+        # Read db_backup.json
+        with open(BACKUP_PATH, "r", encoding="utf-8") as f:
+            content = f.read()
+        content_b64 = base64.b64encode(content.encode('utf-8')).decode('utf-8')
+
+        # GitHub API headers
+        headers = {
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+
+        # Get the current file SHA (if it exists)
+        sha = None
+        try:
+            response = requests.get(
+                f"https://api.github.com/repos/{owner}/{repo}/contents/{BACKUP_PATH}",
+                headers=headers
+            )
+            response.raise_for_status()
+            sha = response.json().get("sha")
+        except RequestException as e:
+            if response.status_code != 404:
+                st.error(f"Failed to check existing {BACKUP_PATH}: {str(e)}")
+                return
+
+        # Commit the file
+        payload = {
+            "message": "Update db_backup.json",
+            "content": content_b64,
+            "branch": "main"  # Adjust if your default branch is different (e.g., "master")
+        }
+        if sha:
+            payload["sha"] = sha
+
+        response = requests.put(
+            f"https://api.github.com/repos/{owner}/{repo}/contents/{BACKUP_PATH}",
+            headers=headers,
+            json=payload
+        )
+        response.raise_for_status()
+        st.success("Successfully committed db_backup.json to GitHub via API!")
+    except RequestException as e:
+        st.error(f"Failed to commit backup to GitHub via API: {str(e)}")
+        st.error(traceback.format_exc())
 
 # -------------------------------
 # Helper Functions
@@ -242,12 +393,17 @@ def add_folder(folder, name, age, profession, category):
         return False
 
 def load_images_to_db(uploaded_files, folder, download_allowed=True):
-    """Load images into the database."""
+    """Load images into the database with compression."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     for uploaded_file in uploaded_files:
-        image_data = uploaded_file.read()
-        extension = os.path.splitext(uploaded_file.name)[1].lower()
+        img = Image.open(uploaded_file)
+        img = img.convert("RGB")  # Ensure consistent format
+        img.thumbnail((800, 800))  # Resize to max 800x800
+        output = io.BytesIO()
+        img.save(output, format="JPEG", quality=85)  # Compress to JPEG
+        image_data = output.getvalue()
+        extension = ".jpg"
         random_filename = f"{uuid.uuid4()}{extension}"
         c.execute("SELECT COUNT(*) FROM images WHERE folder = ? AND name = ?", (folder, random_filename))
         if c.fetchone()[0] == 0:
@@ -262,7 +418,12 @@ def swap_image(folder, old_image_name, new_image_file):
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        new_image_data = new_image_file.read()
+        img = Image.open(new_image_file)
+        img = img.convert("RGB")
+        img.thumbnail((800, 800))
+        output = io.BytesIO()
+        img.save(output, format="JPEG", quality=85)
+        new_image_data = output.getvalue()
         c.execute("UPDATE images SET image_data = ? WHERE folder = ? AND name = ?",
                   (new_image_data, folder, old_image_name))
         conn.commit()
